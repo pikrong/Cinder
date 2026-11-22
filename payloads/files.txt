@@ -1,0 +1,10 @@
+.env
+.git/HEAD
+.git/config
+backup.zip
+config.php.bak
+wp-config.php.bak
+.DS_Store
+.svn/entries
+composer.json
+package.json

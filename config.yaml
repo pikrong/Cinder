@@ -1,0 +1,49 @@
+# Cinder configuration
+# All values can be overridden per-run via CLI flags where applicable.
+
+request:
+  timeout: 10                # seconds per request
+  follow_redirects: true
+  verify_tls: true           # set false only for self-signed test targets
+  headers:
+    User-Agent: "Cinder/1.0 (+https://github.com/your-org/cinder)"
+    Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+
+crawler:
+  max_depth: 2               # link-follow depth from the seed URL
+  max_pages: 100             # hard cap on crawled pages
+  same_host_only: true       # stay on the target host
+  respect_robots: true       # honour robots.txt when crawling
+  delay: 0.3                 # seconds between requests (be polite)
+
+scanner:
+  # Toggle individual checks.
+  checks:
+    headers: true            # missing/weak security headers
+    xss: true                # reflected XSS probe
+    sqli: true               # error-based SQLi probe
+    open_redirect: true      # open redirect probe
+    directory_listing: true  # exposed directory listings
+    sensitive_files: true    # common exposed sensitive paths
+    traversal: true          # path traversal / LFI probe
+    jwt: true                # JWT exposure / alg none / confusion / weak secret
+    idor: true               # identifier tampering
+    ssrf: true               # server-side request forgery probe
+  # Payloads are intentionally conservative; extend as needed.
+  max_urls_to_test: 50       # cap URLs tested per parameter-based check
+  params_to_skip:
+    - csrf_token
+    - _token
+    - __RequestVerificationToken
+  # Advanced features (also toggled via --deep / --fuzz / --chain).
+  domxss_enabled: false      # DOM XSS via headless browser (needs playwright/selenium)
+  fuzz_enabled: false        # fuzzing payload ke semua parameter
+  chain_enabled: false       # sintesis exploit chain
+  llm_api_key: ""            # opsional: validasi temuan via LLM (OpenAI-compatible)
+  llm_base_url: "https://api.openai.com/v1"
+  llm_model: "gpt-4o-mini"
+
+report:
+  title: "Cinder Scan Report"
+  include_evidence: true     # embed request/response snippets
+  output_dir: "reports"

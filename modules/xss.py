@@ -4,6 +4,7 @@ from __future__ import annotations
 import re
 import secrets
 from pathlib import Path
+from typing import Callable
 from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
 from core.http_client import HttpClient
@@ -73,11 +74,17 @@ def _snippet(body: str, needle: str, limit: int = SNIPPET_LEN) -> str:
     return body[start:start + limit]
 
 
-async def run(client: HttpClient, pages: list[str], skip: list[str] | None = None) -> list[Finding]:
+async def run(
+    client: HttpClient,
+    pages: list[str],
+    skip: list[str] | None = None,
+    progress_cb: Callable[[int, int], None] | None = None,
+) -> list[Finding]:
     skip = skip or []
     payloads = _load_payloads()
     findings: list[Finding] = []
 
+    candidates: list[tuple[str, str, str, str]] = []
     for page in pages:
         parsed = urlparse(page)
         if not parsed.query:
@@ -85,38 +92,43 @@ async def run(client: HttpClient, pages: list[str], skip: list[str] | None = Non
         for key in parse_qs(parsed.query, keep_blank_values=True):
             if key in skip:
                 continue
-
             probe = "cinderXSS" + secrets.token_hex(4)
             probe_resp = await client.get(_inject(page, key, probe))
             if not probe_resp or probe not in probe_resp.body:
                 continue
-
             context = detect_context(probe_resp.body, probe)
             if context is None:
                 continue
-
-            candidates = list(payloads.get(context, []))
+            pool = list(payloads.get(context, []))
             if context == "url":
-                candidates += payloads.get("html", [])
+                pool += payloads.get("html", [])
+            for payload in pool:
+                candidates.append((page, key, context, payload))
 
-            for payload in candidates:
-                probe_url = _inject(page, key, payload)
-                hit = await client.get(probe_url)
-                if not hit or payload not in hit.body:
-                    continue
-                finding = evidence.from_response(
-                    check="xss",
-                    severity="medium",
-                    url=probe_url,
-                    detail=f"Reflected XSS via parameter '{key}' (context: {context})",
-                    resp=hit,
-                    payload=payload,
-                )
-                finding.evidence += (
-                    f"\nparam: {key}\ncontext: {context}"
-                    f"\nsnippet: {_snippet(hit.body, payload)}"
-                )
-                findings.append(finding)
-                break
+    total = len(candidates)
+    hit: set[tuple[str, str]] = set()
+    for index, (page, key, context, payload) in enumerate(candidates):
+        if progress_cb:
+            progress_cb(index + 1, total)
+        if (page, key) in hit:
+            continue
+        probe_url = _inject(page, key, payload)
+        resp = await client.get(probe_url)
+        if not resp or payload not in resp.body:
+            continue
+        hit.add((page, key))
+        finding = evidence.from_response(
+            check="xss",
+            severity="medium",
+            url=probe_url,
+            detail=f"Reflected XSS via parameter '{key}' (context: {context})",
+            resp=resp,
+            payload=payload,
+        )
+        finding.evidence += (
+            f"\nparam: {key}\ncontext: {context}"
+            f"\nsnippet: {_snippet(resp.body, payload)}"
+        )
+        findings.append(finding)
 
     return findings

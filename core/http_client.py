@@ -5,6 +5,7 @@ import random
 import sys
 import time
 from dataclasses import dataclass, field
+from typing import Callable
 
 import httpx
 
@@ -45,11 +46,13 @@ class HttpClient:
         retries: int = 2,
         headers: dict | None = None,
         verbose: bool = False,
+        log_sink: Callable[[str], None] | None = None,
     ) -> None:
         self.timeout = timeout
         self.retries = retries
         self.base_headers = headers or {}
         self.verbose = verbose
+        self.log_sink = log_sink
         self.client = httpx.AsyncClient(
             timeout=timeout,
             verify=verify,
@@ -73,7 +76,11 @@ class HttpClient:
         return headers
 
     def _log(self, message: str) -> None:
-        if self.verbose:
+        if not self.verbose:
+            return
+        if self.log_sink:
+            self.log_sink(f"[dim]{message}[/]")
+        else:
             print(f"[VERBOSE] {message}", file=sys.stderr)
 
     async def _request(self, method: str, url: str, **kwargs) -> Response:

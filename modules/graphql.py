@@ -1,6 +1,8 @@
 """GraphQL endpoint discovery, introspection and batching."""
 from __future__ import annotations
 
+from typing import Callable
+
 from core.http_client import HttpClient
 from core.reporter import Finding
 from . import common, evidence
@@ -10,10 +12,17 @@ JSON_HEADERS = {"Content-Type": "application/json"}
 INTROSPECTION = {"query": "{__schema{types{name}}}"}
 
 
-async def run(client: HttpClient, base_url: str) -> list[Finding]:
+async def run(
+    client: HttpClient,
+    base_url: str,
+    progress_cb: Callable[[int, int], None] | None = None,
+) -> list[Finding]:
     findings: list[Finding] = []
     root = common.origin(base_url)
-    for path in PATHS:
+    total = len(PATHS)
+    for index, path in enumerate(PATHS):
+        if progress_cb:
+            progress_cb(index + 1, total)
         url = root + path
         resp = await client.post(url, json=INTROSPECTION, headers=JSON_HEADERS)
         if not resp or resp.status >= 400:

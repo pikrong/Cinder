@@ -10,7 +10,9 @@ from core.reporter import Finding
 from . import evidence
 
 ENDPOINT_RE = re.compile(
-    r"""["'`](/(?:api|v\d|graphql|admin|user|account|auth|internal)[A-Za-z0-9_\-/.]*)["'`]"""
+    r"""["'`]((?:https?://[^"'`\s]+)|(?:/(?:api|v\d|graphql|admin|user|account|auth|internal|rest|service)"""
+    r"""[A-Za-z0-9_\-/.]*(?:\?[A-Za-z0-9_\-=&%.]*)?))["'`]""",
+    re.I,
 )
 SECRET_RE = re.compile(
     r"""(?:api[_-]?key|apikey|secret|token|password|passwd|access[_-]?key)["']?\s*[:=]\s*["']([A-Za-z0-9_\-./+=]{8,})["']""",
@@ -19,9 +21,9 @@ SECRET_RE = re.compile(
 SRC_RE = re.compile(r"""<script[^>]+src=["']([^"']+)["']""", re.I)
 
 
-def _scan(text: str, endpoints: set[str], findings: list[Finding], js_url: str) -> None:
+def _scan(text: str, endpoints: set[str], findings: list[Finding], js_url: str, page: str) -> None:
     for endpoint in ENDPOINT_RE.findall(text):
-        endpoints.add(endpoint)
+        endpoints.add(urljoin(page, endpoint))
     for secret in SECRET_RE.findall(text):
         findings.append(evidence.raw(
             check="jsrecon",
@@ -43,7 +45,7 @@ async def run(client: HttpClient, pages: list[str]) -> tuple[list[Finding], list
         resp = await client.get(page)
         if not resp:
             continue
-        for src in SRC_RE.findall(resp.body)[:20]:
+        for src in SRC_RE.findall(resp.body)[:40]:
             js_url = urljoin(page, src)
             if js_url in seen or not js_url.startswith("http"):
                 continue
@@ -51,7 +53,7 @@ async def run(client: HttpClient, pages: list[str]) -> tuple[list[Finding], list
             js = await client.get(js_url)
             if not js:
                 continue
-            _scan(js.body, endpoints, findings, js_url)
+            _scan(js.body, endpoints, findings, js_url, page)
             if not js_url.endswith(".js"):
                 continue
             source_map = await client.get(js_url + ".map")
@@ -65,7 +67,7 @@ async def run(client: HttpClient, pages: list[str]) -> tuple[list[Finding], list
                 continue
             for content in data["sourcesContent"]:
                 if content:
-                    _scan(content, endpoints, findings, js_url + ".map")
+                    _scan(content, endpoints, findings, js_url + ".map", page)
             findings.append(evidence.from_response(
                 check="jsrecon",
                 severity="medium",

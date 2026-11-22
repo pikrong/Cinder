@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+from typing import Callable
 from urllib.parse import urlparse
 
 from core.http_client import HttpClient
@@ -20,7 +21,11 @@ def _candidates(pages: list[str]):
             yield page
 
 
-async def run(client: HttpClient, pages: list[str]) -> list[Finding]:
+async def run(
+    client: HttpClient,
+    pages: list[str],
+    progress_cb: Callable[[int, int], None] | None = None,
+) -> list[Finding]:
     findings: list[Finding] = []
     targets = list(_candidates(pages))
     if not targets:
@@ -32,7 +37,10 @@ async def run(client: HttpClient, pages: list[str]) -> list[Finding]:
     except Exception:
         have_h2 = False
 
-    for target in targets[:5]:
+    total = len(targets[:5])
+    for index, target in enumerate(targets[:5]):
+        if progress_cb:
+            progress_cb(index + 1, total)
         if have_h2:
             import httpx
             connector_client = httpx.AsyncClient(http2=True, timeout=client.timeout)

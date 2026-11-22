@@ -5,8 +5,8 @@ import asyncio
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterable
-from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
+from typing import Awaitable, Callable
+from urllib.parse import urlparse
 
 import typer
 import yaml
@@ -23,6 +23,7 @@ import modules.cmdi
 import modules.cors
 import modules.csrf
 import modules.deser
+import modules.dir_fuzz
 import modules.domxss
 import modules.fuzzer
 import modules.graphql
@@ -46,6 +47,7 @@ import modules.xss
 from core.crawler import Crawler
 from core.fingerprint import fingerprint
 from core.http_client import HttpClient, Response
+from core.progress import ScanProgress
 from core.reporter import Finding, Report
 
 app = typer.Typer(add_completion=False, help="Cinder — Web Vulnerability Scanner")
@@ -121,14 +123,17 @@ def _snippet(resp: Response, limit: int = 300) -> tuple[str, str]:
 
 
 class Scanner:
-    def __init__(self, cfg: Config):
+    def __init__(self, cfg: Config, progress: "ScanProgress | None" = None):
         self.cfg = cfg
+        self.progress = progress
+        log_sink = progress.log if progress and cfg.verbose else None
         self.client = HttpClient(
             timeout=cfg.timeout,
             verify=cfg.verify_tls,
             follow_redirects=cfg.follow_redirects,
             headers=cfg.headers,
             verbose=cfg.verbose,
+            log_sink=log_sink,
         )
         self.crawler = Crawler(
             self.client,
@@ -138,6 +143,7 @@ class Scanner:
             respect_robots=cfg.respect_robots,
             delay=cfg.delay,
             user_agent=cfg.headers.get("User-Agent", "Cinder/1.0"),
+            on_page=progress.page_done if progress else None,
         )
         self.report = Report(target="", title=cfg.report_title)
         self.visited: list[str] = []
@@ -155,10 +161,6 @@ class Scanner:
     def _attach_evidence(self, finding: Finding) -> None:
         self.report.add(finding)
 
-    async def check_headers(self, url: str) -> None:
-        for finding in await modules.headers.run(self.client, url):
-            self._attach_evidence(finding)
-
     async def check_directory_listing(self, url: str) -> None:
         resp = await self.client.get(url)
         if not resp or "html" not in resp.headers.get("content-type", "").lower():
@@ -169,29 +171,6 @@ class Scanner:
             self._add("directory_listing", "medium", url,
                       "Directory listing terbuka", resp, title[:200])
 
-    async def check_sensitive_files(self, base: str) -> None:
-        for finding in await modules.sensitive_files.run(self.client, base):
-            self._attach_evidence(finding)
-
-    def _iter_param_urls(self, pages: list[str]) -> Iterable[str]:
-        """Yield one URL per testable parameter, for every page (up to --max-pages)."""
-        placeholder = "cinder"
-        for page in pages[: self.cfg.max_pages]:
-            parsed = urlparse(page)
-            if not parsed.query:
-                continue
-            params = parse_qs(parsed.query, keep_blank_values=True)
-            seen: set[str] = set()
-            for key in params:
-                if key in self.cfg.params_to_skip:
-                    continue
-                mutated = {k: v[:] for k, v in params.items()}
-                mutated[key] = [placeholder]
-                combo = urlunparse(parsed._replace(query=urlencode(mutated, doseq=True)))
-                if combo not in seen:
-                    seen.add(combo)
-                    yield combo
-
     def test_targets(self, pages: list[str]) -> list[str]:
         """Unique URLs to test: every discovered parameter of every crawled page."""
         targets: list[str] = []
@@ -201,38 +180,6 @@ class Scanner:
                 seen.add(page)
                 targets.append(page)
         return targets
-
-    async def check_xss(self, pages: list[str]) -> None:
-        for finding in await modules.xss.run(
-            self.client, self.test_targets(pages), self.cfg.params_to_skip
-        ):
-            self._attach_evidence(finding)
-
-    async def check_sqli(self, pages: list[str]) -> None:
-        for finding in await modules.sqli.run(
-            self.client, self.test_targets(pages), self.cfg.params_to_skip
-        ):
-            self._attach_evidence(finding)
-
-    async def check_open_redirect(self, pages: list[str]) -> None:
-        for finding in await modules.redirect.run(self.client, self.test_targets(pages)):
-            self._attach_evidence(finding)
-
-    async def check_traversal(self, pages: list[str]) -> None:
-        for finding in await modules.traversal.run(self.client, self.test_targets(pages)):
-            self._attach_evidence(finding)
-
-    async def check_jwt(self, pages: list[str]) -> None:
-        for finding in await modules.jwt.run(self.client, self.test_targets(pages)):
-            self._attach_evidence(finding)
-
-    async def check_idor(self, pages: list[str]) -> None:
-        for finding in await modules.idor.run(self.client, self.test_targets(pages)):
-            self._attach_evidence(finding)
-
-    async def check_ssrf(self, pages: list[str]) -> None:
-        for finding in await modules.ssrf.run(self.client, self.test_targets(pages)):
-            self._attach_evidence(finding)
 
     async def _seed_auth_pages(self, pages: list[str]) -> list[str]:
         if not (self.cfg.headers.get("Authorization") or self.cfg.headers.get("Cookie")):
@@ -247,51 +194,100 @@ class Scanner:
                 pages.append(candidate)
         return pages
 
-    async def run_deep(self, pages: list[str]) -> None:
-        console.print("[dim]  deep scan: semua modul[/]")
+    async def _run_module(self, name: str, factory: Callable[[], Awaitable[None]]) -> None:
+        if self.progress:
+            self.progress.module_start(name)
+        try:
+            await factory()
+        finally:
+            if self.progress:
+                self.progress.module_done()
+
+    def _payload_cb(self, name: str) -> Callable[[int, int], None] | None:
+        if not self.progress:
+            return None
+        return lambda current, total: self.progress.set_payload_progress(name, current, total)
+
+    def _check(self, name: str, coro_fn: Callable[[], Awaitable[list[Finding]]]):
+        async def runner() -> None:
+            for finding in await coro_fn():
+                self._attach_evidence(finding)
+        return name, runner
+
+    def _build_plan(self, pages: list[str]) -> list[tuple[str, Callable[[], Awaitable[None]]]]:
+        on = lambda name: self.cfg.checks.get(name, False)
+        skip = self.cfg.params_to_skip
+        targets = self.test_targets(pages)
+        plan: list[tuple[str, Callable[[], Awaitable[None]]]] = []
+        check = self._check
+
+        if on("headers"):
+            plan.append(check("headers", lambda: modules.headers.run(self.client, self.report.target)))
+        if on("directory_listing"):
+            async def directory_listing() -> None:
+                for page in pages:
+                    await self.check_directory_listing(page)
+            plan.append(("directory_listing", directory_listing))
+        if on("sensitive_files"):
+            plan.append(check("sensitive_files", lambda: modules.sensitive_files.run(self.client, self.report.target)))
+        if on("xss"):
+            plan.append(check("xss", lambda: modules.xss.run(self.client, targets, skip, progress_cb=self._payload_cb("xss"))))
+        if on("sqli"):
+            plan.append(check("sqli", lambda: modules.sqli.run(self.client, targets, skip, progress_cb=self._payload_cb("sqli"))))
+        if on("open_redirect"):
+            plan.append(check("open_redirect", lambda: modules.redirect.run(self.client, targets)))
+        if on("traversal"):
+            plan.append(check("traversal", lambda: modules.traversal.run(self.client, targets)))
+        if on("jwt"):
+            plan.append(check("jwt", lambda: modules.jwt.run(self.client, targets)))
+        if on("idor"):
+            plan.append(check("idor", lambda: modules.idor.run(self.client, targets)))
+        if on("ssrf"):
+            plan.append(check("ssrf", lambda: modules.ssrf.run(self.client, targets)))
+
+        if self.cfg.deep:
+            plan.extend(self._deep_plan(pages))
+        if self.cfg.fuzz or self.cfg.fuzz_enabled:
+            plan.append(check("fuzzer", lambda: modules.fuzzer.run(self.client, pages, progress_cb=self._payload_cb("fuzzer"))))
+        if self.cfg.chain or self.cfg.chain_enabled:
+            async def chain() -> None:
+                for finding in modules.chain.run(self.report.findings):
+                    self.report.add(finding)
+            plan.append(("chain", chain))
+        return plan
+
+    def _deep_plan(self, pages: list[str]) -> list[tuple[str, Callable[[], Awaitable[None]]]]:
         root = self.report.target
         skip = self.cfg.params_to_skip
+        plan: list[tuple[str, Callable[[], Awaitable[None]]]] = []
+        check = self._check
 
-        schema_findings, schema_endpoints = await modules.apischema.run(self.client, root)
-        js_findings, js_endpoints = await modules.jsrecon.run(self.client, pages)
-        for finding in schema_findings + js_findings:
-            self._attach_evidence(finding)
-        for endpoint in schema_endpoints + js_endpoints:
-            if endpoint.startswith("http") and endpoint not in pages:
-                pages.append(endpoint)
+        async def waf() -> None:
+            name = await modules.waf.run(self.client, root)
+            if name:
+                self.report.add(Finding("waf", "info", root, f"WAF terdeteksi: {name}"))
 
-        async def collect(findings: list[Finding]) -> None:
-            for finding in findings:
-                self._attach_evidence(finding)
+        async def triage() -> None:
+            self.report.findings = await modules.triage.run(self.client, self.report.findings, self.cfg)
 
-        await collect(await modules.cmdi.run(self.client, pages, skip))
-        await collect(await modules.ssti.run(self.client, pages, skip))
-        await collect(await modules.deser.run(self.client, pages))
-        await collect(await modules.cors.run(self.client, pages))
-        await collect(await modules.csrf.run(self.client, pages))
-        await collect(await modules.graphql.run(self.client, root))
-        await collect(await modules.cache.run(self.client, pages))
-        await collect(await modules.upload.run(self.client, pages))
-        await collect(await modules.logic.run(self.client, pages))
-        await collect(await modules.auth.run(self.client, pages))
-        await collect(await modules.race.run(self.client, pages))
-        await collect(await modules.smuggle.run(root, verbose=self.cfg.verbose))
-        await collect(await modules.domxss.run(self.client, pages))
-
-        waf = await modules.waf.run(self.client, root)
-        if waf:
-            self.report.add(Finding("waf", "info", root, f"WAF terdeteksi: {waf}"))
-
-        self.report.findings = await modules.triage.run(self.client, self.report.findings, self.cfg)
-
-        if self.cfg.chain or self.cfg.chain_enabled:
-            for finding in modules.chain.run(self.report.findings):
-                self.report.add(finding)
-
-    async def run_fuzz(self, pages: list[str]) -> None:
-        console.print("[dim]  fuzzing payload[/]")
-        for finding in await modules.fuzzer.run(self.client, pages):
-            self._attach_evidence(finding)
+        plan.extend([
+            check("cmdi", lambda: modules.cmdi.run(self.client, pages, skip, progress_cb=self._payload_cb("cmdi"))),
+            check("ssti", lambda: modules.ssti.run(self.client, pages, skip, progress_cb=self._payload_cb("ssti"))),
+            check("deser", lambda: modules.deser.run(self.client, pages)),
+            check("cors", lambda: modules.cors.run(self.client, pages)),
+            check("csrf", lambda: modules.csrf.run(self.client, pages)),
+            check("graphql", lambda: modules.graphql.run(self.client, root, progress_cb=self._payload_cb("graphql"))),
+            check("cache", lambda: modules.cache.run(self.client, pages)),
+            check("upload", lambda: modules.upload.run(self.client, pages, progress_cb=self._payload_cb("upload"))),
+            check("logic", lambda: modules.logic.run(self.client, pages)),
+            check("auth", lambda: modules.auth.run(self.client, pages)),
+            check("race", lambda: modules.race.run(self.client, pages, progress_cb=self._payload_cb("race"))),
+            check("smuggle", lambda: modules.smuggle.run(root, verbose=self.cfg.verbose)),
+            check("domxss", lambda: modules.domxss.run(self.client, pages)),
+            ("waf", waf),
+            ("triage", triage),
+        ])
+        return plan
 
     async def run(self, url: str) -> Report:
         if not self.cfg.checks:
@@ -301,50 +297,85 @@ class Scanner:
                 "jwt": True, "idor": True, "ssrf": True,
             }
         self.report.target = url
-        console.print(f"[cyan]→ Memindai[/] {url}")
+        if not self.progress:
+            console.print(f"[cyan]→ Memindai[/] {url}")
 
+        # FASE 1: crawl HTML
+        if self.progress:
+            self.progress.start_crawl(self.cfg.max_pages)
         pages = await self.crawler.crawl(url)
         pages = await self._seed_auth_pages(pages)
+        if self.progress:
+            self.progress.crawl_done(len(pages))
+        else:
+            console.print(f"[dim]  {len(pages)} halaman ditemukan (HTML)[/]")
+
+        # FASE 1b: render JS (Playwright) — tambah URL dari DOM + XHR/fetch
+        rendered = await self.crawler.render_js(url)
+        if rendered and not self.progress:
+            console.print(f"[dim]  {len(rendered)} URL dari render JS[/]")
+        pages = self._merge(pages, rendered)
+
+        # FASE 3: endpoint dari JS + API schema
+        if self.cfg.deep:
+            js_findings, js_endpoints = await modules.jsrecon.run(self.client, pages)
+            for finding in js_findings:
+                self._attach_evidence(finding)
+            schema_findings, schema_endpoints = await modules.apischema.run(self.client, url)
+            for finding in schema_findings:
+                self._attach_evidence(finding)
+            pages = self._merge(pages, js_endpoints + schema_endpoints)
+
+        # FASE 2: directory bruteforce
+        if self.progress:
+            self.progress.start_dirs(0)
+        dir_findings, dir_urls = await modules.dir_fuzz.run(
+            self.client,
+            url,
+            progress_cb=self.progress.dirs_progress if self.progress else None,
+        )
+        for finding in dir_findings:
+            self._attach_evidence(finding)
+        if self.progress:
+            self.progress.dirs_done()
+        elif dir_urls:
+            console.print(f"[dim]  {len(dir_urls)} path dari directory fuzzing[/]")
+        pages = self._merge(pages, dir_urls)
+
+        # FASE 3b: parameter paksa untuk setiap URL tanpa query
+        forced: list[str] = []
+        for page in list(pages):
+            if not urlparse(page).query:
+                forced.extend(self.crawler.force_params(page))
+        pages = self._merge(pages, forced)
+
         self.visited = pages
         self.report.pages_crawled = len(pages)
-        console.print(f"[dim]  {len(pages)} halaman ditemukan[/]")
+        if not self.progress:
+            console.print(f"[dim]  total {len(pages)} URL target[/]")
 
         root = await self.client.get(url)
         if root:
             self.report.fingerprint = fingerprint(root)
-            if self.report.fingerprint:
+            if self.report.fingerprint and not self.progress:
                 console.print(f"[dim]  fingerprint: {self.report.fingerprint}[/]")
 
-        on = lambda name: self.cfg.checks.get(name, False)
-        if on("headers"):
-            await self.check_headers(url)
-        if on("directory_listing"):
-            for page in pages:
-                await self.check_directory_listing(page)
-        if on("sensitive_files"):
-            await self.check_sensitive_files(url)
-        if on("xss"):
-            await self.check_xss(pages)
-        if on("sqli"):
-            await self.check_sqli(pages)
-        if on("open_redirect"):
-            await self.check_open_redirect(pages)
-        if on("traversal"):
-            await self.check_traversal(pages)
-        if on("jwt"):
-            await self.check_jwt(pages)
-        if on("idor"):
-            await self.check_idor(pages)
-        if on("ssrf"):
-            await self.check_ssrf(pages)
-        if self.cfg.deep:
-            await self.run_deep(pages)
-        if self.cfg.fuzz or self.cfg.fuzz_enabled:
-            await self.run_fuzz(pages)
-        if (self.cfg.chain or self.cfg.chain_enabled) and not self.cfg.deep:
-            for finding in modules.chain.run(self.report.findings):
-                self.report.add(finding)
+        # FASE 4: semua URL masuk ke modul vulnerability
+        plan = self._build_plan(pages)
+        if self.progress:
+            self.progress.start_modules(len(plan))
+        for name, factory in plan:
+            await self._run_module(name, factory)
         return self.report
+
+    @staticmethod
+    def _merge(pages: list[str], extra: list[str]) -> list[str]:
+        seen = set(pages)
+        for item in extra:
+            if item and item.startswith("http") and item not in seen:
+                seen.add(item)
+                pages.append(item)
+        return pages
 
 
 def _severity_style(sev: str) -> str:
@@ -427,14 +458,17 @@ def scan(
         if sep and name.strip():
             cfg.headers[name.strip()] = value.strip()
 
-    async def _run() -> Report:
-        scanner = Scanner(cfg)
+    async def _run(progress: ScanProgress) -> Report:
+        scanner = Scanner(cfg, progress=progress)
         try:
             return await scanner.run(url)
         finally:
             await scanner.close()
 
-    report = asyncio.run(_run())
+    with ScanProgress(verbose=cfg.verbose) as progress:
+        report = asyncio.run(_run(progress))
+        progress.finish(len(report.findings))
+    console.print(progress.summary())
 
     html_out = as_html or (output is not None and output.suffix.lower() in (".html", ".htm"))
 

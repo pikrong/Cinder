@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import re
 from pathlib import Path
+from typing import Callable
 from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
 from core.http_client import HttpClient
@@ -100,10 +101,11 @@ def _param_keys(url: str, skip: list[str]) -> list[str]:
     return [k for k in parse_qs(parsed.query, keep_blank_values=True) if k not in skip]
 
 
-async def _error_based(client, url, key, payloads, findings) -> bool:
+async def _error_based(client, url, key, payloads, findings, tick) -> bool:
     for technique, dialect, payload in payloads:
         if technique != "error":
             continue
+        tick()
         probe = _inject(url, key, payload)
         resp = await client.get(probe)
         if not resp:
@@ -122,9 +124,11 @@ async def _error_based(client, url, key, payloads, findings) -> bool:
     return False
 
 
-async def _boolean_based(client, url, key, baseline, findings) -> bool:
+async def _boolean_based(client, url, key, baseline, findings, tick) -> bool:
+    tick()
     true_probe = _inject(url, key, BOOL_TRUE)
     resp_true = await client.get(true_probe)
+    tick()
     resp_false = await client.get(_inject(url, key, BOOL_FALSE))
     if not resp_true or not resp_false or baseline is None:
         return False
@@ -157,8 +161,9 @@ async def _boolean_based(client, url, key, baseline, findings) -> bool:
     return False
 
 
-async def _time_based(client, url, key, findings) -> bool:
+async def _time_based(client, url, key, findings, tick) -> bool:
     for dialect, payload in TIME_PAYLOADS:
+        tick()
         probe = _inject(url, key, payload)
         resp = await client.get(probe)
         if resp and resp.elapsed > TIME_THRESHOLD:
@@ -175,13 +180,14 @@ async def _time_based(client, url, key, findings) -> bool:
     return False
 
 
-async def _union_based(client, url, key, baseline, findings) -> bool:
+async def _union_based(client, url, key, baseline, findings, tick) -> bool:
     if baseline is None:
         return False
     base_error = _match_error(baseline.body)
     base_len = len(baseline.body)
     prev_error = True
     for cols in range(1, UNION_MAX_COLUMNS + 1):
+        tick()
         payload = "' UNION SELECT " + ",".join(["NULL"] * cols) + "-- "
         probe = _inject(url, key, payload)
         resp = await client.get(probe)
@@ -204,20 +210,37 @@ async def _union_based(client, url, key, baseline, findings) -> bool:
     return False
 
 
-async def run(client: HttpClient, pages: list[str], skip: list[str] | None = None) -> list[Finding]:
+async def run(
+    client: HttpClient,
+    pages: list[str],
+    skip: list[str] | None = None,
+    progress_cb: Callable[[int, int], None] | None = None,
+) -> list[Finding]:
     skip = skip or []
     payloads = _load_payloads()
     findings: list[Finding] = []
 
-    for page in pages:
-        for key in _param_keys(page, skip):
-            baseline = await client.get(page)
-            if await _error_based(client, page, key, payloads, findings):
-                continue
-            if await _boolean_based(client, page, key, baseline, findings):
-                continue
-            if await _time_based(client, page, key, findings):
-                continue
-            await _union_based(client, page, key, baseline, findings)
+    error_count = sum(1 for technique, _, _ in payloads if technique == "error")
+    per_param = error_count + 2 + len(TIME_PAYLOADS) + UNION_MAX_COLUMNS
+    units = [(page, key) for page in pages for key in _param_keys(page, skip)]
+    total = per_param * len(units) or 1
+
+    sent = 0
+
+    def tick() -> None:
+        nonlocal sent
+        sent += 1
+        if progress_cb:
+            progress_cb(sent, total)
+
+    for page, key in units:
+        baseline = await client.get(page)
+        if await _error_based(client, page, key, payloads, findings, tick):
+            continue
+        if await _boolean_based(client, page, key, baseline, findings, tick):
+            continue
+        if await _time_based(client, page, key, findings, tick):
+            continue
+        await _union_based(client, page, key, baseline, findings, tick)
 
     return findings

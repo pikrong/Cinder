@@ -16,7 +16,7 @@
  ╚═════╝╚═╝╚═╝  ╚═══╝╚═════╝ ╚══════╝╚═╝  ╚═╝
 ```
 
-Cinder v0.3 adalah web vulnerability scanner berbasis Python untuk membantu pengujian keamanan yang sah dengan crawling, deteksi kerentanan, bukti request/response, serta laporan terminal, JSON, dan HTML.
+Cinder v0.5 adalah web vulnerability scanner berbasis Python untuk membantu pengujian keamanan yang sah dengan crawling, deteksi kerentanan, bukti request/response, serta laporan terminal, JSON, dan HTML.
 
 ## Fitur
 

@@ -1,8 +1,3 @@
-[![Python](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-[![GitHub stars](https://img.shields.io/github/stars/pikrong/Cinder?style=social)](https://github.com/pikrong/Cinder/stargazers)
-
-
 # Cinder — Web Vulnerability Scanner
 
 [![Python](https://img.shields.io/badge/Python-3.10+-3776AB?logo=python&logoColor=white)](https://www.python.org/)

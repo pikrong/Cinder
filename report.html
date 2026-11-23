@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cinder Scan Report — https://cimahikota.go.id/beranda</title>
+<style>
+  :root {
+    --bg: #0f1117; --panel: #171a23; --border: #262a36; --text: #e6e8ee;
+    --muted: #8b93a7; --critical: #b3001b; --high: #ff5c5c; --medium: #f5a623; --low: #6b7280; --info: #3ea6ff; --accent: #ff7a45;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 15px/1.6 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }
+  .wrap { max-width: 980px; margin: 0 auto; padding: 40px 24px 80px; }
+  header { border-bottom: 1px solid var(--border); padding-bottom: 20px; margin-bottom: 28px; }
+  h1 { margin: 0 0 6px; font-size: 26px; }
+  h1 .flame { color: var(--accent); }
+  .meta { color: var(--muted); font-size: 13px; }
+  .meta code { color: var(--text); }
+  .stats { display: flex; gap: 12px; flex-wrap: wrap; margin: 24px 0; }
+  .stat { flex: 1 1 140px; background: var(--panel); border: 1px solid var(--border);
+          border-radius: 10px; padding: 14px 16px; }
+  .stat .n { font-size: 28px; font-weight: 700; }
+  .stat .l { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .06em; }
+  .h { color: var(--high); } .m { color: var(--medium); } .lw { color: var(--low); } .i { color: var(--info); }
+  .stat.crit { border-color: var(--critical); background: linear-gradient(180deg, rgba(179,0,27,.18), var(--panel)); }
+  .stat.crit .n { color: #ff6b81; }
+  .stat.crit .l { color: #ff97a6; }
+  h2 { font-size: 18px; margin: 32px 0 12px; }
+  .fp { background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+        padding: 14px 18px; }
+  .fp div { margin: 3px 0; }
+  .fp .cat { color: var(--muted); display: inline-block; min-width: 110px; }
+  .finding { background: var(--panel); border: 1px solid var(--border);
+             border-left: 4px solid var(--border); border-radius: 10px;
+             padding: 16px 18px; margin-bottom: 14px; }
+  .finding.critical { border-left-color: var(--critical); }
+  .finding.high { border-left-color: var(--high); }
+  .finding.medium { border-left-color: var(--medium); }
+  .finding.low { border-left-color: var(--low); }
+  .finding.info { border-left-color: var(--info); }
+  .finding .top { display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap; }
+  .badge { font-size: 11px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase;
+           padding: 2px 8px; border-radius: 999px; border: 1px solid currentColor; }
+  .finding .check { font-weight: 600; }
+  .finding .url { color: var(--muted); font-size: 13px; word-break: break-all; }
+  .finding p { margin: 10px 0 0; }
+  details { margin-top: 12px; }
+  summary { cursor: pointer; color: var(--muted); font-size: 13px; }
+  pre { background: #0b0d13; border: 1px solid var(--border); border-radius: 8px;
+        padding: 12px; overflow-x: auto; font-size: 12px; white-space: pre-wrap;
+        word-break: break-word; }
+  pre code { font: inherit; }
+  .evrow { display: flex; align-items: center; gap: 10px; margin: 12px 0 4px; }
+  .evlabel { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .06em; }
+  .copy { margin-left: auto; background: var(--panel); color: var(--text); cursor: pointer;
+          border: 1px solid var(--border); border-radius: 6px; padding: 3px 10px;
+          font-size: 12px; }
+  .copy:hover { border-color: var(--accent); color: var(--accent); }
+  footer { margin-top: 48px; padding-top: 18px; border-top: 1px solid var(--border);
+           color: var(--muted); font-size: 12px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1><span class="flame">Cinder</span> — Cinder Scan Report</h1>
+    <div class="meta">
+      Target: <code>https://cimahikota.go.id/beranda</code> &nbsp;·&nbsp;
+      Generated: 2026-11-22T08:36:09+00:00 &nbsp;·&nbsp;
+      Pages crawled: 20
+    </div>
+  </header>
+
+  <div class="stats">
+    <div class="stat"><div class="n">5</div><div class="l">Total findings</div></div>
+    <div class="stat crit"><div class="n">0</div><div class="l">Critical</div></div>
+    <div class="stat"><div class="n h">3</div><div class="l">High</div></div>
+    <div class="stat"><div class="n m">1</div><div class="l">Medium</div></div>
+    <div class="stat"><div class="n lw">1</div><div class="l">Low</div></div>
+    <div class="stat"><div class="n i">0</div><div class="l">Info</div></div>
+  </div>
+
+  
+  <h2>Fingerprint</h2>
+  <div class="fp">
+    
+    <div><span class="cat">server</span>nginx</div>
+    
+  </div>
+  
+
+  <h2>Findings</h2>
+  
+    
+    <div class="finding medium">
+      <div class="top">
+        <span class="badge m">medium</span>
+        <span class="check">headers</span>
+      </div>
+      <div class="url">https://cimahikota.go.id/beranda</div>
+      <p>Header keamanan hilang: Content-Security-Policy</p>
+      
+    </div>
+    
+    <div class="finding low">
+      <div class="top">
+        <span class="badge lw">low</span>
+        <span class="check">headers</span>
+      </div>
+      <div class="url">https://cimahikota.go.id/beranda</div>
+      <p>Header keamanan hilang: Permissions-Policy</p>
+      
+    </div>
+    
+    <div class="finding high">
+      <div class="top">
+        <span class="badge h">high</span>
+        <span class="check">cookies</span>
+      </div>
+      <div class="url">https://cimahikota.go.id/beranda</div>
+      <p>Cookie tanpa flag keamanan — XSRF-TOKEN: HttpOnly, Secure, SameSite</p>
+      
+    </div>
+    
+    <div class="finding high">
+      <div class="top">
+        <span class="badge h">high</span>
+        <span class="check">cookies</span>
+      </div>
+      <div class="url">https://cimahikota.go.id/beranda</div>
+      <p>Cookie tanpa flag keamanan — 22-Nov-2026 10:36:12 GMT; Max-Age: HttpOnly</p>
+      
+    </div>
+    
+    <div class="finding high">
+      <div class="top">
+        <span class="badge h">high</span>
+        <span class="check">cookies</span>
+      </div>
+      <div class="url">https://cimahikota.go.id/beranda</div>
+      <p>Cookie tanpa flag keamanan — laravel_session: HttpOnly, Secure, SameSite</p>
+      
+    </div>
+    
+  
+
+  <footer>
+    Generated by Cinder — Web Vulnerability Scanner. Use only on systems you are
+    authorized to test.
+  </footer>
+</div>
+<script>
+document.querySelectorAll("[data-copy]").forEach(function (button) {
+  button.addEventListener("click", function () {
+    var target = document.getElementById(button.getAttribute("data-copy"));
+    if (!target || !navigator.clipboard) return;
+    navigator.clipboard.writeText(target.innerText).then(function () {
+      var original = button.textContent;
+      button.textContent = "Copied!";
+      setTimeout(function () { button.textContent = original; }, 1200);
+    });
+  });
+});
+</script>
+</body>
+</html>

@@ -1,6 +1,7 @@
 """Shared helpers for scanner modules."""
 from __future__ import annotations
 
+import json
 import re
 from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
@@ -42,3 +43,46 @@ def total(body: str) -> float | None:
         return float(match.group(1).replace(",", ""))
     except ValueError:
         return None
+
+
+def parse_json(text: str) -> object | None:
+    try:
+        return json.loads(text)
+    except Exception:
+        return None
+
+
+def json_scalar_paths(data: object, prefix: str = "") -> list[tuple[str, object]]:
+    """Return [(json_path, value)] for every scalar leaf in a JSON document."""
+    out: list[tuple[str, object]] = []
+    if isinstance(data, dict):
+        for key, value in data.items():
+            path = f"{prefix}/{key}" if prefix else str(key)
+            out.extend(json_scalar_paths(value, path))
+    elif isinstance(data, list):
+        for index, value in enumerate(data):
+            path = f"{prefix}/{index}"
+            out.extend(json_scalar_paths(value, path))
+    else:
+        out.append((prefix, data))
+    return out
+
+
+def json_set(data: object, path: str, value: object) -> object:
+    """Set a value at a JSON path produced by `json_scalar_paths` (copy semantics)."""
+    parts = path.split("/")
+    node = data
+    for part in parts[:-1]:
+        node = node[int(part)] if isinstance(node, list) else node[part]
+    last = parts[-1]
+    if isinstance(node, list):
+        node[int(last)] = value
+    else:
+        node[last] = value
+    return data
+
+
+def api_request(method: str, url: str, body: str, headers: dict | None = None) -> dict:
+    """Canonical description of a captured API/XHR request."""
+    return {"method": method.upper(), "url": url, "body": body,
+            "headers": dict(headers or {})}

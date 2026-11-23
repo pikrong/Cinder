@@ -1,10 +1,11 @@
 """Polite same-host crawler with robots.txt enforcement and optional JS rendering."""
 from __future__ import annotations
 
+import asyncio
+import json
 import re
-import time
 from typing import Callable
-from urllib.parse import urljoin, urlparse, urlunparse
+from urllib.parse import parse_qs, urlencode, urljoin, urlparse, urlunparse
 from urllib.robotparser import RobotFileParser
 
 from bs4 import BeautifulSoup
@@ -22,6 +23,9 @@ JS_ENDPOINT_RE = re.compile(
     re.I,
 )
 
+JSON_ENDPOINT_KEY_RE = re.compile(r"(?:url|endpoint|href|link|api|path|uri)$", re.I)
+JSON_ENDPOINT_VAL_RE = re.compile(r"^(?:https?://|/)[^\s]+$")
+
 
 def _normalise(url: str) -> str:
     p = urlparse(url)
@@ -37,6 +41,65 @@ def _extract_links(html: str, base: str) -> list[str]:
             continue
         links.append(urljoin(base, href))
     return links
+
+
+def extract_forms(html: str, base: str) -> list[dict]:
+    """Parse <form> elements: [{action, method, inputs:[names]}]."""
+    soup = BeautifulSoup(html, "lxml")
+    forms: list[dict] = []
+    for form in soup.find_all("form"):
+        action = urljoin(base, form.get("action") or base)
+        method = (form.get("method") or "get").upper()
+        inputs = [
+            inp.get("name")
+            for inp in form.find_all(["input", "textarea", "select"])
+            if inp.get("name")
+        ]
+        forms.append({"action": action, "method": method, "inputs": inputs})
+    return forms
+
+
+def form_test_urls(form: dict) -> list[str]:
+    """Turn a form into testable URLs (GET: query params; POST: action with synthetic query)."""
+    action = form["action"]
+    inputs = form["inputs"] or ["q"]
+    out: list[str] = []
+    if form["method"] == "GET":
+        parsed = urlparse(action)
+        for name in inputs:
+            query = dict(parse_qs(parsed.query, keep_blank_values=True))
+            query[name] = ["test"]
+            out.append(urlunparse(parsed._replace(query=urlencode(query, doseq=True))))
+    else:
+        parsed = urlparse(action)
+        query = dict(parse_qs(parsed.query, keep_blank_values=True))
+        for name in inputs:
+            query[name] = ["test"]
+        out.append(urlunparse(parsed._replace(query=urlencode(query, doseq=True))))
+    return out
+
+
+def json_endpoints(payload: str, base: str) -> list[str]:
+    """Recursively find endpoint-like values in a JSON document."""
+    try:
+        data = json.loads(payload)
+    except Exception:
+        return []
+    found: list[str] = []
+
+    def walk(node) -> None:
+        if isinstance(node, dict):
+            for key, value in node.items():
+                if isinstance(value, str) and JSON_ENDPOINT_KEY_RE.search(str(key)) and JSON_ENDPOINT_VAL_RE.match(value):
+                    found.append(urljoin(base, value))
+                else:
+                    walk(value)
+        elif isinstance(node, list):
+            for item in node:
+                walk(item)
+
+    walk(data)
+    return found
 
 
 class Crawler:
@@ -62,6 +125,26 @@ class Crawler:
         self._robots: RobotFileParser | None = None
         self._robots_host: str | None = None
         self.js_urls: list[str] = []
+        self.forms: list[dict] = []
+        self.xhr: list[dict] = []
+
+    @property
+    def api_targets(self) -> list[dict]:
+        """Captured XHR/fetch requests as {method, url, headers, body} dicts."""
+        targets: list[dict] = []
+        seen: set[tuple[str, str]] = set()
+        for item in self.xhr:
+            key = (item.get("method", "GET"), item.get("url", ""))
+            if key in seen or not item.get("url"):
+                continue
+            seen.add(key)
+            targets.append({
+                "method": item.get("method", "GET"),
+                "url": item["url"],
+                "headers": item.get("headers", {}),
+                "body": item.get("body", ""),
+            })
+        return targets
 
     async def _load_robots(self, start: str) -> None:
         parsed = urlparse(start)
@@ -113,10 +196,23 @@ class Crawler:
             if depth >= self.max_depth:
                 continue
             if self.delay:
-                time.sleep(self.delay)
+                await asyncio.sleep(self.delay)
             resp = await self.client.get(norm)
-            if not resp or "html" not in resp.headers.get("content-type", "").lower():
+            if not resp:
                 continue
+            content_type = resp.headers.get("content-type", "").lower()
+            if "json" in content_type:
+                for endpoint in json_endpoints(resp.body, norm):
+                    if _normalise(endpoint) not in visited:
+                        queue.append((endpoint, depth + 1))
+                continue
+            if "html" not in content_type:
+                continue
+            for form in extract_forms(resp.body, norm):
+                self.forms.append(form)
+                for test_url in form_test_urls(form):
+                    if _normalise(test_url) not in visited:
+                        queue.append((test_url, depth + 1))
             for link in _extract_links(resp.body, norm):
                 if _normalise(link) not in visited:
                     queue.append((link, depth + 1))
@@ -161,7 +257,14 @@ class Crawler:
 
                 def _harvest(request) -> None:
                     _add(request.url)
-                    if request.resource_type in ("xhr", "fetch", "script"):
+                    if request.resource_type in ("xhr", "fetch"):
+                        self.xhr.append({
+                            "method": request.method,
+                            "url": request.url,
+                            "headers": dict(request.headers),
+                            "body": request.post_data or "",
+                        })
+                    elif request.resource_type == "script":
                         self.js_urls.append(request.url)
 
                 page.on("request", _harvest)
@@ -194,6 +297,29 @@ class Crawler:
     def _warn(message: str) -> None:
         import sys
         print(f"[warning] {message}", file=sys.stderr)
+
+    async def login(
+        self,
+        login_url: str,
+        username_field: str,
+        password_field: str,
+        username: str,
+        password: str,
+    ) -> bool:
+        """POST credentials; cookies persist in the shared httpx client jar."""
+        data = {username_field: username, password_field: password}
+        resp = await self.client.post(login_url, data=data)
+        if not resp:
+            self._warn(f"Login gagal: request ke {login_url} tidak berhasil.")
+            return False
+        ok = resp.status < 400 and bool(resp.set_cookies)
+        if not ok and resp.status < 400:
+            ok = True  # server accepted but used existing/token auth
+        self._warn(
+            f"Login {'berhasil' if ok else 'gagal'} (status {resp.status}, "
+            f"{len(resp.set_cookies)} cookie)."
+        )
+        return ok
 
     @staticmethod
     def force_params(base_url: str) -> list[str]:

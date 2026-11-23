@@ -10,8 +10,11 @@ from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 from core.http_client import HttpClient
 from core.reporter import Finding
 import modules.evidence as evidence
+from . import common
 
 PAYLOAD_FILE = Path(__file__).resolve().parent.parent / "payloads" / "xss.txt"
+
+JSON_PAYLOAD = "<svg/onload=alert(1)>"
 
 URL_ATTRS = {"href", "src", "action", "formaction", "data", "poster", "cite", "background"}
 SNIPPET_LEN = 300
@@ -74,11 +77,41 @@ def _snippet(body: str, needle: str, limit: int = SNIPPET_LEN) -> str:
     return body[start:start + limit]
 
 
+async def _json_scan(client, api_targets, findings) -> None:
+    """Inject an XSS payload into JSON body values and check for reflection."""
+    for target in api_targets:
+        data = common.parse_json(target.get("body") or "")
+        if data is None:
+            continue
+        url = target["url"]
+        method = target.get("method", "POST")
+        headers = {"Content-Type": "application/json"}
+        for path, _value in common.json_scalar_paths(data):
+            if not path:
+                continue
+            mutated = common.json_set(common.parse_json(target["body"]), path, JSON_PAYLOAD)
+            resp = await client.request(method, url, json=mutated, headers=headers)
+            if not resp or JSON_PAYLOAD not in resp.body:
+                continue
+            findings.append(evidence.from_response(
+                check="xss",
+                severity="medium",
+                url=url,
+                detail=f"JSON body XSS via '{path}' — {method} {url}",
+                resp=resp,
+                payload=JSON_PAYLOAD,
+                method=method,
+                confidence="medium",
+            ))
+            break
+
+
 async def run(
     client: HttpClient,
     pages: list[str],
     skip: list[str] | None = None,
     progress_cb: Callable[[int, int], None] | None = None,
+    api_targets: list[dict] | None = None,
 ) -> list[Finding]:
     skip = skip or []
     payloads = _load_payloads()
@@ -117,18 +150,26 @@ async def run(
         if not resp or payload not in resp.body:
             continue
         hit.add((page, key))
+        confidence = "high"
+        if await evidence.retest(client, page, probe_url):
+            confidence = "low"
         finding = evidence.from_response(
             check="xss",
             severity="medium",
             url=probe_url,
-            detail=f"Reflected XSS via parameter '{key}' (context: {context})",
+            detail=f"Reflected XSS via parameter '{key}' (context: {context})"
+                   + (" [retest: respons identik dengan baseline]" if confidence == "low" else ""),
             resp=resp,
             payload=payload,
+            confidence=confidence,
         )
         finding.evidence += (
             f"\nparam: {key}\ncontext: {context}"
             f"\nsnippet: {_snippet(resp.body, payload)}"
         )
         findings.append(finding)
+
+    if api_targets:
+        await _json_scan(client, api_targets, findings)
 
     return findings

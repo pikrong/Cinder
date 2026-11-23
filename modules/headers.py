@@ -1,8 +1,6 @@
 """Security header and cookie flag checks."""
 from __future__ import annotations
 
-from urllib.parse import urlparse
-
 from core.http_client import HttpClient, Response
 from core.reporter import Finding
 
@@ -16,22 +14,47 @@ SECURITY_HEADERS = [
     ("permissions-policy", "Permissions-Policy", "low"),
 ]
 
+CSRF_HINTS = ("xsrf", "csrf")
+SESSION_HINTS = ("session", "sess", "sid", "jsessionid", "phpsessid", "auth", "login", "token")
 
-def _cookie_flags(set_cookie_values: list[str]) -> list[str]:
-    issues = []
+
+def _is_csrf(name: str) -> bool:
+    low = name.lower()
+    return any(hint in low for hint in CSRF_HINTS)
+
+
+def _is_session(name: str) -> bool:
+    low = name.lower()
+    return any(hint in low for hint in SESSION_HINTS)
+
+
+def _cookie_issues(set_cookie_values: list[str]) -> list[tuple[str, str]]:
+    """Return [(severity, message)] for each cookie with missing/weak flags."""
+    issues: list[tuple[str, str]] = []
     for raw in set_cookie_values:
+        if not raw.strip():
+            continue
         name = raw.split("=", 1)[0].strip()
-        parts = [p.strip().lower() for p in raw.split(";")]
-        flags = {p.split("=", 1)[0] for p in parts}
+        flags = {p.strip().split("=", 1)[0].lower() for p in raw.split(";")}
+        csrf = _is_csrf(name)
+        session = _is_session(name) and not csrf
+
         missing = []
-        if "httponly" not in flags:
-            missing.append("HttpOnly")
         if "secure" not in flags:
             missing.append("Secure")
+        if "httponly" not in flags and not csrf:
+            missing.append("HttpOnly")
         if "samesite" not in flags:
             missing.append("SameSite")
-        if missing:
-            issues.append(f"{name}: {', '.join(missing)}")
+
+        if not missing:
+            continue
+
+        if session and ("Secure" in missing or "HttpOnly" in missing):
+            severity = "high"
+        else:
+            severity = "medium"
+        issues.append((severity, f"{name}: {', '.join(missing)}"))
     return issues
 
 
@@ -57,17 +80,14 @@ async def run(client: HttpClient, url: str) -> list[Finding]:
             )
         )
 
-    set_cookies = resp.headers.get("set-cookie")
-    if set_cookies:
-        cookies = [c.strip() for c in set_cookies.split(",") if c.strip()]
-        for issue in _cookie_flags(cookies):
-            findings.append(
-                Finding(
-                    check="cookies",
-                    severity="high",
-                    url=url,
-                    detail=f"Cookie tanpa flag keamanan — {issue}",
-                )
+    for severity, issue in _cookie_issues(resp.set_cookies):
+        findings.append(
+            Finding(
+                check="cookies",
+                severity=severity,
+                url=url,
+                detail=f"Cookie tanpa flag keamanan — {issue}",
             )
+        )
 
     return findings

@@ -1,7 +1,11 @@
-"""Exploit chain synthesis from findings."""
+"""Exploit chain synthesis from findings, with loud terminal output."""
 from __future__ import annotations
 
+from rich.console import Console
+
 from core.reporter import Finding
+
+console = Console()
 
 CHAINS = {
     "sqli": ("SQLi → dump kredensial → login → upload shell", "critical", [
@@ -36,7 +40,7 @@ CHAINS = {
     ]),
     "idor": ("IDOR → akses data pengguna lain", "high", [
         "Konfirmasi akses objek lintas-akun",
-        "Enumerasi ID untuk mengambil data massal",
+        "Enumerasi ID & akses endpoint admin/user lain",
     ]),
     "open_redirect": ("Open redirect → phishing / bypass filter", "medium", [
         "Konfirmasi redirect ke domain eksternal",
@@ -44,8 +48,18 @@ CHAINS = {
     ]),
 }
 
+LOUD = {
+    "sqli": "SQLi ditemukan di {url}! Mencoba ekstrak tabel/user & bypass login...",
+    "idor": "IDOR ditemukan di {url}! Mencoba akses endpoint admin/user lain...",
+    "jwt": "JWT lemah di {url}! Mencoba forge token admin...",
+    "ssrf": "SSRF ditemukan di {url}! Mencoba akses metadata cloud...",
+    "traversal": "LFI ditemukan di {url}! Mencoba baca file sensitif...",
+    "upload": "Upload berbahaya di {url}! Mencoba akses webshell...",
+    "cmdi": "Command injection di {url}! Mencoba eksekusi perintah...",
+}
 
-def run(findings: list[Finding]) -> list[Finding]:
+
+def run(findings: list[Finding], verbose: bool = True) -> list[Finding]:
     by_check: dict[str, list[Finding]] = {}
     for finding in findings:
         by_check.setdefault(finding.check, []).append(finding)
@@ -55,16 +69,21 @@ def run(findings: list[Finding]) -> list[Finding]:
         hits = by_check.get(check)
         if not hits:
             continue
+        url = hits[0].url
+        if verbose and check in LOUD:
+            console.print(f"[bold red]\\[CHAIN][/] [bold yellow]{LOUD[check].format(url=url)}[/]")
         steps_text = "\n".join(f"{i + 1}. {step}" for i, step in enumerate(steps))
         chains.append(Finding(
             check="chain",
             severity=severity,
-            url=hits[0].url,
+            url=url,
             detail=name,
             evidence=f"Temuan pemicu: {len(hits)} ({check})\n{steps_text}",
         ))
 
     if "sqli" in by_check and "upload" in by_check:
+        if verbose:
+            console.print("[bold red]\\[CHAIN][/] [bold yellow]SQLi + upload → full takeover[/]")
         chains.append(Finding(
             check="chain",
             severity="critical",

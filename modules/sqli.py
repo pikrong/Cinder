@@ -9,9 +9,11 @@ from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
 from core.http_client import HttpClient
 from core.reporter import Finding
-from . import evidence
+from . import common, evidence
 
 PAYLOAD_FILE = Path(__file__).resolve().parent.parent / "payloads" / "sqli.txt"
+
+JSON_PAYLOADS = ["1' OR '1'='1", "1' OR 1=1-- ", "' OR SLEEP(5)-- ", "1\""]
 
 ERROR_SIGNATURES = {
     "mysql": [
@@ -112,14 +114,19 @@ async def _error_based(client, url, key, payloads, findings, tick) -> bool:
             continue
         matched = _match_error(resp.body)
         if matched:
+            confidence = "high"
+            if await evidence.retest(client, url, probe):
+                confidence = "low"
             findings.append(evidence.from_response(
                 check="sqli",
                 severity="high",
                 url=probe,
-                detail=f"Error-based SQLi ({matched}) via parameter '{key}'",
+                detail=f"Error-based SQLi ({matched}) via parameter '{key}'"
+                       + (" [retest: respons identik dengan baseline]" if confidence == "low" else ""),
                 resp=resp,
                 payload=payload,
             ))
+            findings[-1].confidence = confidence
             return True
     return False
 
@@ -210,11 +217,44 @@ async def _union_based(client, url, key, baseline, findings, tick) -> bool:
     return False
 
 
+async def _json_scan(client, api_targets, findings) -> None:
+    """Inject SQLi payloads into JSON body values of captured API requests."""
+    for target in api_targets:
+        data = common.parse_json(target.get("body") or "")
+        if data is None:
+            continue
+        url = target["url"]
+        method = target.get("method", "POST")
+        headers = {"Content-Type": "application/json"}
+        for path, _value in common.json_scalar_paths(data):
+            if not path:
+                continue
+            for payload in JSON_PAYLOADS:
+                mutated = common.json_set(common.parse_json(target["body"]), path, payload)
+                resp = await client.request(method, url, json=mutated, headers=headers)
+                if not resp:
+                    continue
+                matched = _match_error(resp.body)
+                if matched:
+                    findings.append(evidence.from_response(
+                        check="sqli",
+                        severity="high",
+                        url=url,
+                        detail=f"JSON body SQLi ({matched}) via '{path}' — "
+                               f"{method} {url} {{{path.split('/')[-1]!r}: ...}}",
+                        resp=resp,
+                        payload=payload,
+                        method=method,
+                    ))
+                    break
+
+
 async def run(
     client: HttpClient,
     pages: list[str],
     skip: list[str] | None = None,
     progress_cb: Callable[[int, int], None] | None = None,
+    api_targets: list[dict] | None = None,
 ) -> list[Finding]:
     skip = skip or []
     payloads = _load_payloads()
@@ -242,5 +282,8 @@ async def run(
         if await _time_based(client, page, key, findings, tick):
             continue
         await _union_based(client, page, key, baseline, findings, tick)
+
+    if api_targets:
+        await _json_scan(client, api_targets, findings)
 
     return findings

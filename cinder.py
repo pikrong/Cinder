@@ -34,7 +34,9 @@ import modules.jwt
 import modules.logic
 import modules.race
 import modules.redirect
+import modules.portscan
 import modules.sensitive_files
+import modules.server_audit
 import modules.smuggle
 import modules.sqli
 import modules.ssrf
@@ -49,6 +51,7 @@ from core.fingerprint import fingerprint
 from core.http_client import HttpClient, Response
 from core.progress import ScanProgress
 from core.reporter import Finding, Report
+from core import template_engine
 
 app = typer.Typer(add_completion=False, help="Cinder — Web Vulnerability Scanner")
 console = Console()
@@ -80,6 +83,15 @@ class Config:
     domxss_enabled: bool = False
     chain_enabled: bool = False
     fuzz_enabled: bool = False
+    login_url: str = ""
+    login_user_field: str = "username"
+    login_pass_field: str = "password"
+    username: str = ""
+    password: str = ""
+    async_mode: bool = False
+    max_concurrency: int = 10
+    proxies: list = field(default_factory=list)
+    stealth: bool = False
 
     @classmethod
     def load(cls, path: Path | None) -> "Config":
@@ -134,6 +146,9 @@ class Scanner:
             headers=cfg.headers,
             verbose=cfg.verbose,
             log_sink=log_sink,
+            max_concurrency=cfg.max_concurrency,
+            proxies=cfg.proxies,
+            stealth=cfg.stealth,
         )
         self.crawler = Crawler(
             self.client,
@@ -218,6 +233,7 @@ class Scanner:
         on = lambda name: self.cfg.checks.get(name, False)
         skip = self.cfg.params_to_skip
         targets = self.test_targets(pages)
+        api_targets = self.crawler.api_targets
         plan: list[tuple[str, Callable[[], Awaitable[None]]]] = []
         check = self._check
 
@@ -231,9 +247,9 @@ class Scanner:
         if on("sensitive_files"):
             plan.append(check("sensitive_files", lambda: modules.sensitive_files.run(self.client, self.report.target)))
         if on("xss"):
-            plan.append(check("xss", lambda: modules.xss.run(self.client, targets, skip, progress_cb=self._payload_cb("xss"))))
+            plan.append(check("xss", lambda: modules.xss.run(self.client, targets, skip, progress_cb=self._payload_cb("xss"), api_targets=api_targets)))
         if on("sqli"):
-            plan.append(check("sqli", lambda: modules.sqli.run(self.client, targets, skip, progress_cb=self._payload_cb("sqli"))))
+            plan.append(check("sqli", lambda: modules.sqli.run(self.client, targets, skip, progress_cb=self._payload_cb("sqli"), api_targets=api_targets)))
         if on("open_redirect"):
             plan.append(check("open_redirect", lambda: modules.redirect.run(self.client, targets)))
         if on("traversal"):
@@ -284,6 +300,9 @@ class Scanner:
             check("race", lambda: modules.race.run(self.client, pages, progress_cb=self._payload_cb("race"))),
             check("smuggle", lambda: modules.smuggle.run(root, verbose=self.cfg.verbose)),
             check("domxss", lambda: modules.domxss.run(self.client, pages)),
+            check("portscan", lambda: modules.portscan.run(root, progress_cb=self._payload_cb("portscan"))),
+            check("server_audit", lambda: modules.server_audit.run(self.client, root)),
+            check("templates", lambda: template_engine.run(self.client, pages)),
             ("waf", waf),
             ("triage", triage),
         ])
@@ -300,6 +319,15 @@ class Scanner:
         if not self.progress:
             console.print(f"[cyan]→ Memindai[/] {url}")
 
+        if self.cfg.login_url and self.cfg.username:
+            await self.crawler.login(
+                self.cfg.login_url,
+                self.cfg.login_user_field,
+                self.cfg.login_pass_field,
+                self.cfg.username,
+                self.cfg.password,
+            )
+
         # FASE 1: crawl HTML
         if self.progress:
             self.progress.start_crawl(self.cfg.max_pages)
@@ -315,6 +343,11 @@ class Scanner:
         if rendered and not self.progress:
             console.print(f"[dim]  {len(rendered)} URL dari render JS[/]")
         pages = self._merge(pages, rendered)
+
+        xhr_urls = [item["url"] for item in self.crawler.xhr]
+        if xhr_urls and not self.progress:
+            console.print(f"[dim]  {len(xhr_urls)} endpoint XHR/fetch[/]")
+        pages = self._merge(pages, xhr_urls)
 
         # FASE 3: endpoint dari JS + API schema
         if self.cfg.deep:
@@ -401,10 +434,11 @@ def render_terminal(report: Report) -> None:
     table = Table(title="Cinder Findings", show_lines=True)
     table.add_column("Severity", style="bold")
     table.add_column("Check")
+    table.add_column("CWE")
     table.add_column("URL", overflow="fold")
     table.add_column("Detail", overflow="fold")
     for f in report.findings:
-        table.add_row(f"[{_severity_style(f.severity)}]{f.severity}[/]", f.check, f.url, f.detail)
+        table.add_row(f"[{_severity_style(f.severity)}]{f.severity}[/]", f.check, f.cwe or "-", f.url, f.detail)
     console.print(table)
     render_summary(report)
 
@@ -427,7 +461,16 @@ def scan(
     auth_token: str | None = typer.Option(None, "--auth-token", help="Bearer token untuk sesi terautentikasi."),
     cookie: str | None = typer.Option(None, "--cookie", help="Cookie sesi (format 'name=value; ...')."),
     header: list[str] = typer.Option([], "--header", help="Header tambahan 'Key: Value' (boleh diulang)."),
+    sarif: bool = typer.Option(False, "--sarif", help="Keluarkan laporan format SARIF."),
+    login_url: str | None = typer.Option(None, "--login-url", help="URL form login untuk sesi terautentikasi."),
+    username: str | None = typer.Option(None, "--username", help="Username untuk login."),
+    password: str | None = typer.Option(None, "--password", help="Password untuk login."),
+    login_user_field: str = typer.Option("username", "--login-field-user", help="Nama field username di form login."),
+    login_pass_field: str = typer.Option("password", "--login-field-pass", help="Nama field password di form login."),
     no_banner: bool = typer.Option(False, "--no-banner", help="Sembunyikan banner."),
+    async_mode: bool = typer.Option(False, "--async", help="Mode async agresif: 100 request paralel, tanpa rate-limit."),
+    proxy_list: Path | None = typer.Option(None, "--proxy-list", help="File berisi daftar proxy (satu per baris) untuk rotasi."),
+    stealth: bool = typer.Option(False, "--stealth", help="Jeda acak 1-5 detik antar request (bypass rate-limit)."),
 ) -> None:
     """Pindai URL target dan laporkan kerentanan web."""
     if not url.startswith(("http://", "https://")):
@@ -447,6 +490,30 @@ def scan(
     cfg.deep = deep
     cfg.fuzz = fuzz
     cfg.chain = chain
+
+    if login_url:
+        cfg.login_url = login_url
+    if username:
+        cfg.username = username
+    if password:
+        cfg.password = password
+    cfg.login_user_field = login_user_field
+    cfg.login_pass_field = login_pass_field
+
+    if async_mode:
+        cfg.async_mode = True
+        cfg.max_concurrency = 100
+        cfg.delay = 0
+
+    cfg.stealth = stealth
+    if proxy_list:
+        if proxy_list.exists():
+            cfg.proxies = [
+                line.strip() for line in proxy_list.read_text().splitlines()
+                if line.strip() and not line.strip().startswith("#")
+            ]
+        else:
+            console.print(f"[yellow]Peringatan:[/] file proxy tidak ditemukan: {proxy_list}")
 
     if auth_token:
         token = auth_token if auth_token.lower().startswith("bearer ") else f"Bearer {auth_token}"
@@ -471,6 +538,17 @@ def scan(
     console.print(progress.summary())
 
     html_out = as_html or (output is not None and output.suffix.lower() in (".html", ".htm"))
+
+    if sarif:
+        if output:
+            report.write_sarif(output)
+            render_terminal(report)
+            console.print(f"[green]✓[/] Laporan SARIF disimpan: {output}")
+        else:
+            console.print_json(data=report.to_sarif())
+        if any(f.severity in ("high", "critical") for f in report.findings):
+            raise typer.Exit(code=1)
+        return
 
     if html_out:
         target = output or Path(f"{urlparse(url).netloc or 'report'}.html")

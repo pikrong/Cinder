@@ -61,6 +61,7 @@ def to_finding(
     url: str,
     detail: str,
     captured: dict,
+    confidence: str = "",
 ) -> Finding:
     evidence_text = "\n".join(
         part for part in (
@@ -80,7 +81,25 @@ def to_finding(
         payload=captured.get("payload", ""),
         timestamp=captured.get("timestamp", ""),
         reproduction=captured.get("reproduction", ""),
+        confidence=confidence,
     )
+
+
+async def retest(client, normal_url: str, payload_url: str) -> bool:
+    """True when the normal and payload responses are identical (weak signal).
+
+    Sends one baseline request and one payload request, compares a hash of the
+    response body. Used to downgrade confidence on sqli/xss findings.
+    """
+    import hashlib
+
+    base = await client.get(normal_url)
+    probe = await client.get(payload_url)
+    if not base or not probe:
+        return False
+    base_hash = hashlib.sha256(base.body.encode("utf-8", "ignore")).hexdigest()
+    probe_hash = hashlib.sha256(probe.body.encode("utf-8", "ignore")).hexdigest()
+    return base_hash == probe_hash and base.status == probe.status
 
 
 def from_response(
@@ -91,18 +110,21 @@ def from_response(
     resp: Response,
     payload: str = "",
     method: str = "GET",
+    confidence: str = "",
 ) -> Finding:
     """Convenience wrapper: capture `resp` and build a Finding."""
+    body = getattr(resp, "request_body", "") or ""
     captured = capture(
         method,
         url,
         headers=getattr(resp, "request_headers", None),
+        body=body,
         response_status=resp.status,
         response_headers=resp.headers,
         response_body=resp.body,
         payload=payload,
     )
-    return to_finding(check, severity, url, detail, captured)
+    return to_finding(check, severity, url, detail, captured, confidence=confidence)
 
 
 def raw(

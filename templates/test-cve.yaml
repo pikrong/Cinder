@@ -1,0 +1,18 @@
+# Contoh template Nuclei-style untuk Cinder.
+# Salin file ini dan ubah sesuai kebutuhan. Semua field info/requests opsional
+# kecuali id dan requests.
+id: test-cve
+info:
+  name: Contoh deteksi halaman rentan
+  severity: medium
+requests:
+  - method: GET
+    path: /
+    matchers:
+      status: [200]
+      words: ["html"]
+  - method: GET
+    path: /.git/config
+    matchers:
+      status: [200]
+      regex: ["\\[core\\]"]
